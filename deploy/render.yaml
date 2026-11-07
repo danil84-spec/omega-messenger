@@ -1,0 +1,19 @@
+# Render Blueprint: бесплатный веб-сервис с WebSocket.
+# 1) Залейте репозиторий на GitHub.
+# 2) Render → New → Blueprint → выберите репозиторий (Render прочитает этот файл).
+# Или New → Web Service и вручную: build/start команды ниже.
+services:
+  - type: web
+    name: omega-messenger
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+      - key: PYTHONUNBUFFERED
+        value: "1"

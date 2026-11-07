@@ -1,0 +1,6 @@
+# Caddy сам получает сертификат Let's Encrypt для домена из переменной DOMAIN
+# и проксирует WebSocket на контейнер с сервером OMEGA.
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy omega:8080
+}

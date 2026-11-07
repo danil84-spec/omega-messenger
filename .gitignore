@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+omega_config.json
+keyring.json
+*_keys.json
+*_history.json
+*_trust.json
+.pytest_cache/
+dist/
+build/
+release/
+tools/
+*.log

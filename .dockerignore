@@ -1,0 +1,17 @@
+dist/
+build/
+tests/
+legacy/
+deploy/
+__pycache__/
+*.pyc
+*.exe
+*.spec
+*_keys.json
+*_history.json
+*_trust.json
+omega_config.json
+keyring.json
+README.md
+start_messenger.bat
+build_exe.bat
