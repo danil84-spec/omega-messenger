@@ -1,4 +1,4 @@
-# Где разместить сервер OMEGA
+﻿# Где разместить сервер OMEGA
 
 Серверу нужен только Python 3.10+ и открытый порт. Состояние — один файл
 `keyring.json` (закреплённые публичные ключи) и офлайн-очередь в памяти.
@@ -39,36 +39,85 @@ python deploy\make_client_package.py wss://203.0.113.10.sslip.io/ws
 
 ## A. Render (бесплатно, проще всего)
 
-1. Зарегистрируйтесь на [render.com](https://render.com) через GitHub.
-2. Залейте проект в GitHub (ключи и история не попадут — они в `.gitignore`):
+Проект уже в git: репозиторий инициализирован, всё лишнее (ключи, exe, история)
+в `.gitignore`. Осталось залить его на GitHub и создать сервис.
 
-   ```bat
-   cd C:\Users\meow\Desktop\мессенджер
-   git init
-   git add .
-   git commit -m "Omega messenger"
-   git branch -M main
-   git remote add origin https://github.com/ВАШ_ЛОГИН/omega-messenger.git
-   git push -u origin main
-   ```
+### 1. Репозиторий на GitHub
 
-3. Render → **New → Web Service** → выберите репозиторий:
-   * Language: **Python 3**
-   * Build Command: `pip install -r requirements.txt`
-   * Start Command: `python server.py`
-   * Instance Type: **Free**
-4. Через пару минут получите адрес вида `https://omega-xxxx.onrender.com`.
-   Проверка: откройте его в браузере — должно быть `Omega E2E server is running`.
-5. В клиенте (окно входа) адрес сервера: `wss://omega-xxxx.onrender.com/ws`.
+На [github.com](https://github.com) → **New repository** → имя `omega-messenger`,
+**Public**, без README и .gitignore → **Create**.
 
-В репозитории уже лежит `deploy/render.yaml` — можно вместо шагов 3–4 сделать
-**New → Blueprint** и указать репозиторий.
+Затем одним из способов:
 
-Особенности бесплатного плана: сервис засыпает после 15 минут без соединений
-(первое подключение ~30–60 секунд), файл `keyring.json` пропадает при
-перезапуске — закреплённые ключи сбросятся, собеседники заново подтвердят
-отпечатки. Для постоянного хранения нужен платный диск (`/data` + переменная
-`OMEGA_KEYRING=/data/keyring.json`).
+**Способ А — скриптом:**
+
+```bat
+cd C:\Users\meow\Desktop\мессенджер
+deploy\push-to-github.bat https://github.com/ВАШ_ЛОГИН/omega-messenger.git
+```
+
+При первом запуске откроется окно входа GitHub (или спросит токен).
+
+**Способ Б — вручную:**
+
+```bat
+cd C:\Users\meow\Desktop\мессенджер
+git remote add origin https://github.com/ВАШ_ЛОГИН/omega-messenger.git
+git branch -M main
+git push -u origin main
+```
+
+### 2. Сервис на Render
+
+Зарегистрируйтесь на [render.com](https://render.com) через GitHub, затем:
+
+**Вариант Blueprint (быстрее):** **New → Blueprint** → выберите репозиторий →
+Render сам прочитает `deploy/render.yaml` → **Apply**.
+
+**Вариант вручную:** **New → Web Service** → репозиторий →
+Language **Python 3**, Build Command `pip install -r requirements-server.txt`,
+Start Command `python server.py`, Instance Type **Free**, Region **Frankfurt** →
+**Create Web Service**.
+
+Через 2–4 минуты будет адрес `https://omega-xxxx.onrender.com`.
+
+### 3. Проверка
+
+```bat
+curl https://omega-xxxx.onrender.com/
+python deploy\check_server.py wss://omega-xxxx.onrender.com/ws
+```
+
+Первая команда вернёт `Omega E2E server is running`, вторая — `OK`.
+
+### 4. Клиент для показа
+
+```bat
+python deploy\make_client_package.py wss://omega-xxxx.onrender.com/ws
+```
+
+Получится архив с уже вписанным адресом — его и отправляйте.
+
+### 5. Чтобы сервис не засыпал
+
+Бесплатный инстанс засыпает после 15 минут без запросов, и первый вход
+занимает 30–60 секунд. Лечится бесплатным пингером:
+
+1. [cron-job.org](https://cron-job.org) → Create cronjob;
+2. URL: `https://omega-xxxx.onrender.com/`, каждые **10 минут**;
+3. всё, сервис просыпается сам.
+
+В бесплатном плане 750 часов инстанса в месяц, а в месяце максимум 744 — один
+круглосуточный сервис помещается.
+
+### Особенности бесплатного плана
+
+* засыпает без пингов (первое подключение ~30–60 с; клиент переподключается сам);
+* `keyring.json` стирается при перезапуске/редеплое — закреплённые ключи
+  сбрасываются, собеседники заново подтвердят отпечатки;
+* офлайн-очередь живёт в памяти и при засыпании пропадает;
+* для постоянного хранения нужен платный диск: `OMEGA_KEYRING=/data/keyring.json`
+  и диск, смонтированный в `/data`.
 
 ---
 
