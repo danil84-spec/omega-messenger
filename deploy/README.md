@@ -72,7 +72,7 @@ git push -u origin main
 Зарегистрируйтесь на [render.com](https://render.com) через GitHub, затем:
 
 **Вариант Blueprint (быстрее):** **New → Blueprint** → выберите репозиторий →
-Render сам прочитает `deploy/render.yaml` → **Apply**.
+Render сам прочитает `render.yaml` → **Apply**.
 
 **Вариант вручную:** **New → Web Service** → репозиторий →
 Language **Python 3**, Build Command `pip install -r requirements-server.txt`,
