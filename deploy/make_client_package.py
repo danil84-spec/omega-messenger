@@ -13,6 +13,7 @@ import shutil
 import sys
 import tempfile
 import zipfile
+from urllib.parse import urlparse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXE = os.path.join(ROOT, "dist", "OmegaClient.exe")
@@ -57,7 +58,8 @@ def main() -> int:
         print(f"Нет {EXE}\nСначала соберите клиент: build_exe.bat")
         return 1
 
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", url.split("//", 1)[-1])
+    safe = urlparse(url).hostname or "local"
+    safe = re.sub(r"[^A-Za-z0-9.-]+", "_", safe)
     out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(
         ROOT, "release", f"OMEGA-Messenger-{safe}.zip")
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
