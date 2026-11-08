@@ -1,0 +1,12 @@
+#cloud-config
+# Автонастройка OMEGA при создании VM в Oracle Cloud.
+# Вставляется в: Advanced options -> Management -> Cloud-init script
+package_update: true
+packages:
+  - git
+  - python3-venv
+  - curl
+
+runcmd:
+  - [bash, -lc, "git clone https://github.com/danil84-spec/omega-messenger.git /opt/omega && cd /opt/omega && bash deploy/oracle-setup.sh > /var/log/omega-setup.log 2>&1"]
+  - [bash, -lc, "echo 'OMEGA setup finished' >> /var/log/omega-setup.log"]
