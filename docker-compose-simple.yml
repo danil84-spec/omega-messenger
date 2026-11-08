@@ -1,0 +1,19 @@
+services:
+  # Минимальный вариант: сервер слушает 8080 напрямую, без HTTPS и домена.
+  # Клиент подключается по ws://IP:8080/ws — работает в сетях, где нет VPN.
+  # Переписка всё равно зашифрована на клиентах (E2E), TLS нужен только
+  # чтобы скрыть метаданные от провайдера.
+  omega:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - OMEGA_KEYRING=/data/keyring.json
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

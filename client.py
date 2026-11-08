@@ -5,7 +5,10 @@
 """
 import argparse
 import asyncio
+import base64
 import json
+import math
+import mimetypes
 import os
 import shutil
 import socket
@@ -39,14 +42,68 @@ SERVER_URI = load_config().get("server_url", "ws://127.0.0.1:8080/ws")
 KEY_DIR = data_dir()
 
 RECONNECT_MAX_DELAY = 30
+OPEN_TIMEOUT = 90          # Render free «просыпается» до минуты
 WS_PING_INTERVAL = 20
 WS_PING_TIMEOUT = 10
+
+ATTACH_DIR = os.path.join(data_dir(), "attachments")
+MAX_FILE_BYTES = 15 * 1024 * 1024      # 15 МБ на файл
+CHUNK_BYTES = 360 * 1024               # часть файла: после base64 ~492 КБ,
+                                       # а crypto.py ограничивает сообщение 512 КБ
+EMOJIS = [
+    "😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😎", "🤔", "🙃",
+    "😉", "😇", "🥳", "😢", "😭", "😡", "🤯", "😱", "🤗", "🤝",
+    "👍", "👎", "👏", "🙏", "💪", "✌️", "🤞", "👌", "🫶", "🤙",
+    "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "💔", "💯", "🔥",
+    "✨", "🎉", "🎊", "🎁", "🏆", "⚡", "💡", "☀️", "🌙", "⭐",
+    "🍕", "🍔", "🍟", "☕", "🍺", "🍰", "🍎", "🍓", "🥳", "🎂",
+    "🚀", "✈️", "🚗", "🏠", "💻", "📱", "📷", "🎧", "🎮", "⚽",
+    "🐱", "🐶", "🦊", "🐻", "🐼", "🦁", "🐸", "🦄", "🐧", "🐳",
+    "✅", "❌", "⚠️", "❓", "❗", "💤", "👀", "🤯", "🥶", "🤪",
+]
 
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля",
           "августа", "сентября", "октября", "ноября", "декабря"]
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
+
+
+def _crash_log_path() -> str:
+    try:
+        return os.path.join(data_dir(), "crash.log")
+    except Exception:
+        return os.path.join(os.path.dirname(sys.executable), "crash.log")
+
+
+def _write_crash(exc_type, exc, tb) -> None:
+    """Пишем падение в crash.log: у windowed-exe консоли нет."""
+    try:
+        with open(_crash_log_path(), "a", encoding="utf-8") as f:
+            f.write("\n=== " + time.strftime("%Y-%m-%d %H:%M:%S") + " ===\n")
+            f.write("".join(traceback.format_exception(exc_type, exc, tb)))
+    except Exception:
+        pass
+
+
+def _install_crash_hooks() -> None:
+    # В сборке без консоли sys.stdout/stderr = None, и любой print() падает.
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+    sys.excepthook = _write_crash
+
+    def _thread_hook(args):
+        _write_crash(args.exc_type, args.exc_value, args.exc_traceback)
+
+    try:
+        threading.excepthook = _thread_hook
+    except Exception:
+        pass
+
+
+_install_crash_hooks()
 
 
 class OmegaClient(ctk.CTk):
@@ -61,10 +118,14 @@ class OmegaClient(ctk.CTk):
         self.history: dict[str, list[dict]] = {}
         self.unread: dict[str, int] = {}
         self.online_users: set[str] = set()
+        self.known_users: set[str] = set()
+        self._connected = False
+        self._last_conn_error = ""
         self.last_seen: dict[str, float] = {}
         self.current_chat: str | None = None
         self.tab = "chats"
         self._seen_ids: set[str] = set()
+        self._incoming_files: dict[str, dict] = {}
         self._last_date = None
         self._settings_window = None
         self.ws = None
@@ -92,11 +153,11 @@ class OmegaClient(ctk.CTk):
         self._start_network()
 
     def _on_tk_error(self, exc, val, tb) -> None:
-        """Не засорять консоль безвредным шумом Tk при пересборке виджетов."""
+        """Безвредный шум Tk игнорируем, остальное пишем в crash.log."""
         text = str(val)
         if "invalid command name" in text or "bad window path" in text:
             return
-        print("".join(traceback.format_exception(exc, val, tb)), file=sys.stderr)
+        _write_crash(exc, val, tb)
 
     # ================= Persistence =================
     def _load_or_create_keys(self) -> KeyPair:
@@ -245,31 +306,52 @@ class OmegaClient(ctk.CTk):
             command=self._show_fingerprint, state="disabled")
         self.fp_button.grid(row=0, column=2, padx=(0, 12))
 
+        # Плашка состояния связи: видно, почему нет контактов
+        self.conn_bar = ctk.CTkLabel(
+            chat, text="", anchor="w", fg_color=t.separator,
+            text_color="#e8a33d", font=s.font(11), height=26,
+            corner_radius=0, padx=10)
+        self._conn_visible = False
+
         # Лента
         self.chat_view = ChatView(chat, self.settings, t)
-        self.chat_view.grid(row=1, column=0, sticky="nsew")
+        self.chat_view.grid(row=2, column=0, sticky="nsew")
         self.chat_view.show_empty("Выберите чат слева, чтобы начать переписку")
 
         # Ввод
         bottom = ctk.CTkFrame(chat, fg_color=t.bg_header, corner_radius=0,
                               height=64)
-        bottom.grid(row=2, column=0, sticky="ew")
+        bottom.grid(row=3, column=0, sticky="ew")
         bottom.grid_propagate(False)
-        bottom.grid_columnconfigure(0, weight=1)
+        bottom.grid_columnconfigure(2, weight=1)
+
+        ctk.CTkButton(bottom, text="\U0001F600", width=38, height=40,
+                      corner_radius=10, fg_color="transparent",
+                      hover_color=t.hover, text_color=t.text_dim,
+                      font=(s.font_family, 17),
+                      command=self._open_emoji_picker).grid(
+            row=0, column=0, padx=(10, 2), pady=12)
+
+        ctk.CTkButton(bottom, text="\U0001F4CE", width=38, height=40,
+                      corner_radius=10, fg_color="transparent",
+                      hover_color=t.hover, text_color=t.text_dim,
+                      font=(s.font_family, 16),
+                      command=self.pick_and_send_file).grid(
+            row=0, column=1, padx=(0, 6), pady=12)
 
         self.msg_entry = ctk.CTkEntry(
             bottom, height=40, corner_radius=18, fg_color=t.bg_input,
             border_width=0, placeholder_text="Написать сообщение...",
             placeholder_text_color=t.text_dim, text_color=t.text,
             font=s.font(13))
-        self.msg_entry.grid(row=0, column=0, sticky="ew", padx=(14, 8), pady=12)
+        self.msg_entry.grid(row=0, column=2, sticky="ew", padx=(0, 8), pady=12)
         self.msg_entry.bind("<Return>", lambda e: self.send_message())
 
         ctk.CTkButton(bottom, text="\u27A4", width=40, height=40,
                       corner_radius=20, fg_color=t.accent,
                       hover_color=t.active, text_color="#ffffff",
                       font=(s.font_family, 16),
-                      command=self.send_message).grid(row=0, column=1,
+                      command=self.send_message).grid(row=0, column=3,
                                                       padx=(0, 14), pady=12)
 
     def _rebuild_ui(self) -> None:
@@ -391,7 +473,10 @@ class OmegaClient(ctk.CTk):
                 fill="x", pady=40)
 
     def _fill_contacts(self, query: str) -> None:
-        known = set(self.online_users) | set(self.pubkeys) | set(self.history)
+        # known_users — все ники, закреплённые на сервере (в том числе офлайн),
+        # иначе новый клиент не видел никого, пока собеседник не зайдёт.
+        known = (set(self.online_users) | set(self.known_users)
+                 | set(self.pubkeys) | set(self.history))
         try:
             known |= set(self.trust.data)
         except Exception:
@@ -411,12 +496,20 @@ class OmegaClient(ctk.CTk):
             shown += 1
 
         if not shown:
-            EmptyState(
-                self.list_frame,
-                "Пока никого нет" if not query else "Не найдено",
-                "Как только кто-то войдёт в сеть, он появится в списке.",
-                self.settings, self.theme, icon="\U0001F465").pack(
-                fill="x", pady=40)
+            if not self._connected:
+                EmptyState(
+                    self.list_frame, "Нет связи с сервером",
+                    (self._last_conn_error or "Проверьте интернет и адрес сервера.")
+                    + "\n\nСписок контактов появится после подключения.",
+                    self.settings, self.theme, icon="\U0001F50C").pack(
+                    fill="x", pady=40)
+            else:
+                EmptyState(
+                    self.list_frame,
+                    "Пока никого нет" if not query else "Не найдено",
+                    "Как только кто-то войдёт в сеть, он появится в списке.",
+                    self.settings, self.theme, icon="\U0001F465").pack(
+                    fill="x", pady=40)
 
     def _fill_settings_tab(self) -> None:
         for w in self.list_frame.winfo_children():
@@ -594,6 +687,177 @@ class OmegaClient(ctk.CTk):
             self.pubkeys[user] = pk
         return pk
 
+    # ================= Эмодзи =================
+    def _open_emoji_picker(self) -> None:
+        theme = self.theme
+        win = ctk.CTkToplevel(self)
+        win.title("Эмодзи")
+        win.geometry("340x300")
+        win.configure(fg_color=theme.bg_sidebar)
+        win.transient(self)
+        frame = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        frame.pack(fill="both", expand=True, padx=6, pady=6)
+        for i, emoji in enumerate(EMOJIS):
+            ctk.CTkButton(
+                frame, text=emoji, width=36, height=36, corner_radius=8,
+                fg_color="transparent", hover_color=theme.hover,
+                font=(self.settings.font_family, 17),
+                command=lambda e=emoji: self._insert_emoji(e, win)
+            ).grid(row=i // 8, column=i % 8, padx=1, pady=1)
+
+    def _insert_emoji(self, emoji: str, win=None) -> None:
+        try:
+            self.msg_entry.insert("insert", emoji)
+            self.msg_entry.focus_set()
+        except Exception:
+            pass
+        if win is not None:
+            win.destroy()
+
+    # ================= Файлы и фото =================
+    def pick_and_send_file(self) -> None:
+        if not self.current_chat:
+            messagebox.showwarning("Внимание", "Выберите чат слева!", parent=self)
+            return
+        path = filedialog.askopenfilename(
+            title="Отправить файл или фото",
+            filetypes=[("Картинки", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
+                       ("Все файлы", "*.*")], parent=self)
+        if not path:
+            return
+        try:
+            size = os.path.getsize(path)
+        except OSError as e:
+            messagebox.showerror("Файл", f"Не удалось прочитать файл:\n{e}", parent=self)
+            return
+        if size > MAX_FILE_BYTES:
+            messagebox.showerror(
+                "Файл слишком большой",
+                f"Максимум 15 МБ, а выбран файл {size / 1024 / 1024:.1f} МБ.",
+                parent=self)
+            return
+        if self._get_peer_pubkey(self.current_chat) is None:
+            messagebox.showinfo("Подождите", "Ключ собеседника ещё не получен.",
+                                parent=self)
+            return
+        target = self.current_chat
+        threading.Thread(target=self._send_file_worker, args=(target, path),
+                         daemon=True).start()
+
+    def _send_file_worker(self, target: str, path: str) -> None:
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+            size = len(data)
+            total = max(1, math.ceil(size / CHUNK_BYTES))
+            file_id = uuid.uuid4().hex
+            name = os.path.basename(path)
+            mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+            pk = self._get_peer_pubkey(target)
+            if pk is None:
+                raise RuntimeError("ключ собеседника не получен")
+
+            for i in range(total):
+                chunk = data[i * CHUNK_BYTES:(i + 1) * CHUNK_BYTES]
+                envelope = {
+                    "type": "file", "id": file_id, "name": name, "mime": mime,
+                    "size": size, "part": i, "total": total,
+                    "data": base64.b64encode(chunk).decode(),
+                }
+                payload = encrypt_message(self.keys, pk, json.dumps(envelope))
+                future = asyncio.run_coroutine_threadsafe(
+                    self._send_payload(target, payload), self.loop)
+                future.result(timeout=60)
+                percent = int((i + 1) * 100 / total)
+                self._ui(lambda p=percent: self._set_status(
+                    f"Отправка файла: {p}%", "orange"))
+                time.sleep(0.02)
+
+            stored = self._store_attachment(path, file_id, name)
+            rec = {"sender": self.username, "text": "", "ts": time.time(),
+                   "trusted": True, "status": "sent",
+                   "type": "image" if mime.startswith("image/") else "file",
+                   "name": name, "size": size, "path": stored}
+            self._ui(lambda r=rec: self._finish_file_send(target, r))
+        except Exception as e:                        # noqa: BLE001
+            self._ui(lambda e=e: messagebox.showerror(
+                "Не отправлено", f"Файл не ушёл:\n{e}", parent=self))
+
+    async def _send_payload(self, target: str, payload: str) -> None:
+        if not self.ws:
+            raise RuntimeError("нет соединения с сервером")
+        await self.ws.send(json.dumps({"action": "send", "to": target,
+                                       "payload": payload, "ts": time.time()}))
+
+    def _store_attachment(self, src: str, uid: str, name: str = "") -> str:
+        try:
+            os.makedirs(ATTACH_DIR, exist_ok=True)
+            ext = os.path.splitext(name or src)[1] or ".bin"
+            dst = os.path.join(ATTACH_DIR, f"{uid}{ext}")
+            shutil.copy2(src, dst)
+            return dst
+        except Exception as e:
+            print(f"[attach] {e}")
+            return src
+
+    def _finish_file_send(self, target: str, rec: dict) -> None:
+        self.history.setdefault(target, []).append(rec)
+        self._save_history()
+        self._append_record(target, rec)
+        self._refresh_list()
+        self._set_status("Файл отправлен", "green")
+
+    async def _on_file_part(self, sender: str, env: dict, ts: float) -> None:
+        file_id = env.get("id")
+        if not file_id:
+            return
+        slot = self._incoming_files.setdefault(
+            file_id, {"meta": env, "parts": {}, "ts": ts})
+        try:
+            slot["parts"][int(env.get("part", 0))] = base64.b64decode(
+                env.get("data", ""))
+        except Exception as e:
+            print(f"[file] плохая часть: {e}")
+            return
+        total = int(env.get("total") or 1)
+        if len(slot["parts"]) < total:
+            self._ui(lambda n=len(slot["parts"]), t=total: self._set_status(
+                f"Получение файла: {n}/{t}", "orange"))
+            return
+        data = b"".join(slot["parts"][i] for i in sorted(slot["parts"]))
+        self._incoming_files.pop(file_id, None)
+        self._ui(lambda: self._finish_file_receive(sender, slot["meta"], data,
+                                                   slot["ts"]))
+
+    def _finish_file_receive(self, sender: str, meta: dict, data: bytes,
+                             ts: float) -> None:
+        name = meta.get("name") or "файл"
+        mime = meta.get("mime") or ""
+        try:
+            os.makedirs(ATTACH_DIR, exist_ok=True)
+            ext = os.path.splitext(name)[1] or ".bin"
+            path = os.path.join(ATTACH_DIR, f"{meta.get('id')}{ext}")
+            with open(path, "wb") as f:
+                f.write(data)
+        except Exception as e:
+            print(f"[attach] сохранить не удалось: {e}")
+            path = ""
+
+        rec = {"sender": sender, "text": "", "ts": ts or time.time(),
+               "trusted": self.trust.is_trusted(sender),
+               "type": "image" if mime.startswith("image/") else "file",
+               "name": name, "size": len(data), "path": path}
+        self.history.setdefault(sender, []).append(rec)
+        self._save_history()
+        if self.current_chat == sender:
+            self._append_record(sender, rec)
+        else:
+            self.unread[sender] = self.unread.get(sender, 0) + 1
+        self._refresh_list()
+        self._update_title()
+        if hasattr(self, "chat_status"):
+            self._set_status(f"Получен файл: {name}", "green")
+
     # ================= Сеть (логика без изменений) =================
     def _start_network(self) -> None:
         threading.Thread(target=self._run_loop, daemon=True).start()
@@ -608,9 +872,12 @@ class OmegaClient(ctk.CTk):
     async def _connect(self) -> None:
         attempt = 0
         while not self._abort and not self._closing:
+            reason = ""
             try:
                 async with websockets.connect(
                     self.server_uri,
+                    open_timeout=OPEN_TIMEOUT,
+                    close_timeout=5,
                     ping_interval=WS_PING_INTERVAL,
                     ping_timeout=WS_PING_TIMEOUT,
                     max_size=2 * 1024 * 1024,
@@ -639,18 +906,25 @@ class OmegaClient(ctk.CTk):
                                 "Это окно отключено от сервера.",
                                 parent=self)))
                         return
+            except (asyncio.TimeoutError, TimeoutError):
+                # На бесплатном тарифе сервис просыпается до минуты —
+                # это не ошибка, поэтому и сообщение человеческое.
+                reason = "сервер не отвечает (просыпается?)"
             except websockets.exceptions.ConnectionClosed:
-                self._ui(lambda: self._set_status("Соединение закрыто", "orange"))
+                reason = "соединение закрыто"
             except Exception as e:
                 if self._abort:
                     return
-                self._ui(lambda e=e: self._set_status(f"Нет связи: {e}", "red"))
+                reason = self._human_net_error(e)
 
             if self._abort or self._closing:
                 return
             delay = min(RECONNECT_MAX_DELAY, 2 ** attempt)
-            self._ui(lambda d=delay: self._set_status(
-                f"Переподключение через {d} с...", "orange"))
+            if reason:
+                message = f"{reason} · переподключение через {delay} с…"
+            else:
+                message = f"Переподключение через {delay} с…"
+            self._ui(lambda m=message: self._set_status(m, "orange"))
             await asyncio.sleep(delay)
             attempt += 1
 
@@ -669,6 +943,7 @@ class OmegaClient(ctk.CTk):
                 for peer in self.online_users - o:
                     self.last_seen[peer] = time.time()
                 self.online_users = o
+                self.known_users = set(u)
                 self._refresh_list()
                 self._refresh_header()
             self._ui(_apply)
@@ -771,6 +1046,16 @@ class OmegaClient(ctk.CTk):
             text = decrypt_message(self.keys.private_key, payload)
         except Exception as e:
             text = f"[не удалось расшифровать: {e}]"
+
+        # Файл приходит частями: распознаём конверт до сохранения в историю.
+        if text.startswith("{"):
+            try:
+                envelope = json.loads(text)
+            except Exception:
+                envelope = None
+            if isinstance(envelope, dict) and envelope.get("type") == "file":
+                await self._on_file_part(sender, envelope, ts)
+                return
 
         trusted = self.trust.is_trusted(sender)
         rec = {"sender": sender, "text": text, "ts": ts, "trusted": trusted}
@@ -928,14 +1213,60 @@ class OmegaClient(ctk.CTk):
             self._append_record(peer, rec)
 
     def _set_status(self, text: str, color: str = "gray") -> None:
-        """Короткий статус в шапке чата (сеть, ошибки)."""
+        """Статус в шапке чата + плашка состояния связи."""
         if not hasattr(self, "chat_status"):
             return
-        if not self.current_chat:
-            self.chat_status.configure(text=text, text_color=color)
-        else:
-            self.chat_status.configure(text=text, text_color=color)
+        self.chat_status.configure(text=text, text_color=color)
+        if self.current_chat:
             self.after(3000, self._refresh_header)
+        self._connected = color == "green"
+        if self._connected:
+            self._last_conn_error = ""
+        else:
+            self._last_conn_error = text
+        self._show_conn_bar(text if color in ("orange", "red") else "")
+
+    def _show_conn_bar(self, text: str) -> None:
+        """Постоянная строка с причиной: видно, почему контактов нет."""
+        if not hasattr(self, "conn_bar"):
+            return
+        try:
+            if text:
+                self.conn_bar.configure(text=text)
+                if not self._conn_visible:
+                    self.conn_bar.grid(row=1, column=0, sticky="ew")
+                    self._conn_visible = True
+            elif self._conn_visible:
+                self.conn_bar.grid_remove()
+                self._conn_visible = False
+        except Exception:
+            pass
+
+    @staticmethod
+    def _human_net_error(exc: Exception) -> str:
+        """Человеческая причина вместо «[Errno 11001] getaddrinfo failed»."""
+        text = str(exc)
+        low = text.lower()
+        name = type(exc).__name__
+        if "invaliduri" in name.lower() or "scheme" in low or "uri" in low:
+            return "неверный адрес сервера — нужен ws:// или wss:// и /ws в конце"
+        if isinstance(exc, socket.gaierror) or "getaddrinfo" in low or "name or service" in low:
+            return "сервер не найден (DNS) — проверьте интернет или VPN"
+        if "did not receive a valid http response" in low:
+            return "сервер ответил не по-WebSocket — проверьте адрес (нужен …/ws)"
+        if isinstance(exc, ConnectionRefusedError) or "refused" in low:
+            return "сервер отклонил подключение"
+        if ("121" in text or "semaphore" in low or "семафор" in text
+                or "timed out" in low or "10060" in text):
+            return ("соединение с сервером обрывается — провайдер или VPN "
+                    "блокирует адрес; нужен сервер с прямым IP")
+        if "ssl" in low or "certificate" in low:
+            return "ошибка TLS — возможно, мешает VPN или прокси"
+        if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or "timed out" in low:
+            return "сервер не отвечает (просыпается?)"
+        if "network is unreachable" in low or "unreachable" in low:
+            return "сеть недоступна"
+        return text[:90]
 
     def _ui(self, fn) -> None:
         try:
@@ -1086,6 +1417,23 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    _install_crash_hooks()
+    try:
+        _main()
+    except Exception:
+        _write_crash(*sys.exc_info())
+        try:
+            messagebox.showerror(
+                "OMEGA — ошибка",
+                "Программа столкнулась с ошибкой и будет закрыта.\n\n"
+                f"Подробности записаны в файл:\n{_crash_log_path()}\n\n"
+                "Пришлите этот файл разработчику.")
+        except Exception:
+            pass
+        raise
+
+
+def _main() -> None:
     args = _parse_args()
     cfg = load_config()
 

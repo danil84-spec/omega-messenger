@@ -12,13 +12,21 @@ if errorlevel 1 goto fail
 python -m PyInstaller --noconfirm --clean OmegaClient.spec
 if errorlevel 1 goto fail
 
+rem Портативная версия «папкой» — надёжнее one-file (нет распаковки в %TEMP%)
+python -m PyInstaller --noconfirm --clean OmegaClientDir.spec
+if errorlevel 1 goto fail
+
 python -m PyInstaller --noconfirm --clean OmegaServer.spec
 if errorlevel 1 goto fail
 
 echo.
-echo Готово: dist\OmegaMessenger.exe, dist\OmegaClient.exe, dist\OmegaServer.exe
-echo Держите OmegaMessenger.exe и OmegaServer.exe в одной папке.
-echo Для раздачи людям собирайте release: OmegaClient.exe + ПРОЧТИ-МЕНЯ.txt.
+echo Готово:
+echo   dist\OmegaMessenger.exe   - клиент с меню запуска
+echo   dist\OmegaClient.exe      - клиент одним файлом
+echo   dist\OmegaClient\OmegaClient.exe - клиент папкой (надёжнее)
+echo   dist\OmegaServer.exe      - сервер
+echo.
+echo Раздача: python deploy\make_client_package.py --dir wss://адрес/ws
 pause
 exit /b 0
 

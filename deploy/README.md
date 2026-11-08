@@ -1,4 +1,4 @@
-﻿# Где разместить сервер OMEGA
+# Где разместить сервер OMEGA
 
 Серверу нужен только Python 3.10+ и открытый порт. Состояние — один файл
 `keyring.json` (закреплённые публичные ключи) и офлайн-очередь в памяти.
@@ -10,20 +10,75 @@ TLS можно не настраивать на самом сервере: у б
 
 | Вариант | Цена | Время | Плюсы | Минусы |
 |---|---|---|---|---|
-| A. Render | 0 ₽ | 10 мин | Ничего не администрировать | Засыпает через 15 мин, keyring стирается при рестарте |
+| A. Render | 0 ₽ | 10 мин | Ничего не администрировать | Засыпает через 15 мин; **у части провайдеров РФ открывается только через VPN** |
 | B. Oracle Cloud Always Free | 0 ₽ | 40 мин | Постоянная VM, полный контроль | Нужна карта для верификации, своя возня с TLS |
 | C. Свой ПК + Cloudflare Tunnel | 0 ₽ | 5 мин | Работает сегодня, данные у вас | ПК включён, адрес меняется |
-| D. Дешёвый VPS | ~200–400 ₽/мес | 30 мин | Предсказуемо, постоянный домен | Платно |
+| D. VPS в РФ (без TLS) | ~200–400 ₽/мес | 10 мин | **Работает без VPN**, адрес постоянный, без домена и сертификатов | Платно |
 
 ## Что выбрать для показа работодателю
 
-Нужен адрес, который откроется в любой момент и не поменяется, — поэтому:
+Если у заказчика сеть, где `onrender.com` не открывается без VPN (частая
+история в РФ), единственный надёжный вариант — **VPS в РФ с адресом
+`ws://IP:8080/ws`**: ни домена, ни сертификата не нужно, TLS не требуется,
+потому что переписка и так зашифрована на клиентах.
 
-1. **VPS + Docker** — [vps-quickstart.md](vps-quickstart.md). 10 минут, 200–350 ₽/мес,
-   домен не нужен (работает `sslip.io`), HTTPS настраивается сам. Рекомендую.
-2. **Render** (вариант A) — бесплатно и без сервера, но первый вход ~30 секунд
-   из-за засыпания.
-3. Свой ПК + туннель — только для быстрой пробы: адрес меняется при каждом запуске.
+1. **VPS в РФ + `docker-compose-simple.yml`** — см. раздел E ниже. 10 минут,
+   200–350 ₽/мес, работает без VPN. Рекомендую.
+2. **VPS + HTTPS и домен** — [vps-quickstart.md](vps-quickstart.md), если нужен
+   красивый адрес `wss://…`.
+3. **Render** (вариант A) — бесплатно, но у части провайдеров только через VPN.
+4. Свой ПК + туннель — только для быстрой пробы: адрес меняется при каждом запуске.
+
+## E. VPS в РФ без TLS (работает без VPN)
+
+1. Купите VPS: Timeweb Cloud, Aeza, Beget — Ubuntu 24.04, 1 vCPU, 1 ГБ.
+   Запишите IP, например `203.0.113.10`.
+2. Поставьте Docker:
+
+   ```bash
+   ssh root@203.0.113.10
+   curl -fsSL https://get.docker.com | sh
+   ```
+
+3. Залейте проект с компьютера (в новом окне PowerShell):
+
+   ```powershell
+   scp -r "C:\Users\meow\Desktop\мессенджер" root@203.0.113.10:/opt/omega
+   ```
+
+4. Запустите:
+
+   ```bash
+   cd /opt/omega && mkdir -p data
+   docker compose -f docker-compose-simple.yml up -d --build
+   ufw allow 8080/tcp || true
+   ```
+
+5. Проверка: `curl http://203.0.113.10:8080/` → `Omega E2E server is running`.
+
+6. Адрес для клиента: **`ws://203.0.113.10:8080/ws`** — без VPN, без домена.
+
+7. Соберите архив клиента под этот адрес:
+
+   ```bat
+   python deploy\make_client_package.py ws://203.0.113.10:8080/ws
+   ```
+
+Порт 8080 должен быть открыт и в панели хостинга (Security Group / Firewall),
+если там есть такая настройка.
+
+### Без Docker (ещё проще, если Docker не нужен)
+
+```bash
+apt update && apt install -y python3-venv
+mkdir -p /opt/omega && cd /opt/omega
+python3 -m venv .venv && .venv/bin/pip install aiohttp
+# скопируйте server.py и config.py в /opt/omega (scp)
+nohup .venv/bin/python server.py --host 0.0.0.0 --port 8080 &
+```
+
+Для автозапуска после перезагрузки — systemd-юнит из
+[vps-quickstart.md](vps-quickstart.md) (замените путь и уберите `--host 127.0.0.1`).
 
 После развёртывания соберите архив клиента под этот адрес:
 
@@ -123,63 +178,59 @@ python deploy\make_client_package.py wss://omega-xxxx.onrender.com/ws
 
 ## B. Oracle Cloud Always Free (бесплатно навсегда, нужна карта)
 
-Виртуальная машина, которая не засыпает. Карта нужна только для проверки
-личности, списаний на Always Free нет.
+Виртуальная машина, которая не засыпает и работает без VPN.
+Карта нужна только для проверки личности, списаний на Always Free нет.
 
 1. Регистрация на [cloud.oracle.com](https://cloud.oracle.com), регион поближе
    (например, Frankfurt).
-2. **Compute → Instances → Create**: образ Ubuntu 22.04, shape `VM.Standard.A1.Flex`
-   (Ampere, 1–2 OCPU, 6 ГБ) или `VM.Standard.E2.1.Micro`.
-3. В **Security List** подсети откройте входящие порты 80 и 443.
-4. На машине:
+2. **Compute → Instances → Create**: Ubuntu 24.04.
+   * `VM.Standard.A1.Flex` (Ampere, 1–2 OCPU, 6 ГБ) — если пишет
+     «out of host capacity», попробуйте другое Availability Domain или
+     `VM.Standard.E2.1.Micro` (AMD, 1 ГБ).
+   * Галочку «Assign a public IPv4 address» оставьте включённой.
+3. **Откройте порт 8080** (без этого снаружи не подключиться):
+   **Networking → Virtual Cloud Networks → ваша VCN → Security Lists →
+   Default Security List → Add Ingress Rule**:
+   Source `0.0.0.0/0`, IP Protocol `TCP`, Destination Port Range `8080`.
+
+4. На машине (подключитесь: `ssh ubuntu@IP`, ключ Oracle даёт при создании):
 
    ```bash
-   sudo apt update && sudo apt install -y python3-venv git
-   git clone https://github.com/ВАШ_ЛОГИН/omega-messenger.git /opt/omega
+   sudo apt update && sudo apt install -y git
+   git clone https://github.com/danil84-spec/omega-messenger.git /opt/omega
    cd /opt/omega
-   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+   sudo bash deploy/oracle-setup.sh
    ```
 
-5. Служба `/etc/systemd/system/omega.service`:
+   Скрипт сам поставит Python-окружение, создаст службу `omega`,
+   включит автозапуск, откроет порт в firewall и напечатает адрес вида
+   `ws://130.61.x.x:8080/ws`.
 
-   ```ini
-   [Unit]
-   Description=Omega messenger server
-   After=network.target
+5. Проверка (с вашего компьютера):
 
-   [Service]
-   WorkingDirectory=/opt/omega
-   Environment=OMEGA_KEYRING=/opt/omega/keyring.json
-   ExecStart=/opt/omega/.venv/bin/python server.py --host 127.0.0.1 --port 8080
-   Restart=always
-   User=ubuntu
-
-   [Install]
-   WantedBy=multi-user.target
+   ```powershell
+   curl http://IP:8080/
+   python deploy\check_server.py ws://IP:8080/ws
    ```
 
-   ```bash
-   sudo systemctl daemon-reload && sudo systemctl enable --now omega
+6. Клиент для заказчика собирается под этот адрес:
+
+   ```bat
+   python deploy\make_client_package.py --dir ws://IP:8080/ws
    ```
 
-6. HTTPS/WSS через Caddy (сам получает сертификат):
+   TLS и домен не нужны: переписка шифруется на устройствах, `ws://` лишь
+   открывает метаданные провайдеру. Если позже захотите `wss://` — в
+   [vps-quickstart.md](vps-quickstart.md) есть Caddy, который сам получает
+   сертификат.
 
-   ```bash
-   sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
-   curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-   echo "deb https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-   sudo apt update && sudo apt install -y caddy
-   ```
+### Полезное по Oracle
 
-   `/etc/caddy/Caddyfile`:
-
-   ```
-   omega.example.com {
-       reverse_proxy 127.0.0.1:8080
-   }
-   ```
-
-   `sudo systemctl reload caddy`. В клиенте: `wss://omega.example.com/ws`.
+* Служба: `systemctl status omega`, логи: `journalctl -u omega -f`.
+* Перезапуск: `sudo systemctl restart omega`.
+* Ключи закрепляются в `/opt/omega/keyring.json` — делайте копию.
+* Если `curl` снаружи молчит, а локально `http://127.0.0.1:8080/` отвечает —
+  почти всегда забыли пункт 3 (Security List).
 
 ---
 

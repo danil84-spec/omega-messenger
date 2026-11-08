@@ -44,31 +44,42 @@ README = """OMEGA Messenger — тестовая сборка
 
 
 def main() -> int:
-    if len(sys.argv) < 2:
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    use_dir = "--dir" in sys.argv
+    if not args:
         print(__doc__)
         return 2
-    url = sys.argv[1].strip()
+    url = args[0].strip()
     if not (url.startswith("ws://") or url.startswith("wss://")):
         print("Адрес должен начинаться с ws:// или wss://")
         return 2
     if not url.rstrip("/").endswith("/ws"):
         url = url.rstrip("/") + "/ws"
 
-    if not os.path.exists(EXE):
+    dir_build = os.path.join(ROOT, "dist", "OmegaClient")
+    if use_dir:
+        if not os.path.exists(os.path.join(dir_build, "OmegaClient.exe")):
+            print("Нет папочной сборки. Соберите: PyInstaller OmegaClientDir.spec")
+            return 1
+    elif not os.path.exists(EXE):
         print(f"Нет {EXE}\nСначала соберите клиент: build_exe.bat")
         return 1
 
     safe = urlparse(url).hostname or "local"
     safe = re.sub(r"[^A-Za-z0-9.-]+", "_", safe)
-    out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(
-        ROOT, "release", f"OMEGA-Messenger-{safe}.zip")
+    suffix = "-portable" if use_dir else ""
+    out = args[1] if len(args) > 1 else os.path.join(
+        ROOT, "release", f"OMEGA-Messenger-{safe}{suffix}.zip")
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
 
     tmp = tempfile.mkdtemp(prefix="omega_pack_")
     folder = os.path.join(tmp, "OMEGA-Messenger")
     os.makedirs(folder)
 
-    shutil.copy2(EXE, os.path.join(folder, "OmegaClient.exe"))
+    if use_dir:
+        shutil.copytree(dir_build, folder, dirs_exist_ok=True)
+    else:
+        shutil.copy2(EXE, os.path.join(folder, "OmegaClient.exe"))
     with open(os.path.join(folder, "omega_config.json"), "w", encoding="utf-8") as f:
         json.dump({"server_url": url, "username": "", "pin_keys": True},
                   f, ensure_ascii=False, indent=2)
@@ -76,8 +87,11 @@ def main() -> int:
         f.write(README.format(url=url))
 
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-        for name in os.listdir(folder):
-            z.write(os.path.join(folder, name), f"OMEGA-Messenger/{name}")
+        for root, _dirs, files in os.walk(folder):
+            for name in files:
+                full = os.path.join(root, name)
+                rel = os.path.relpath(full, tmp).replace("\\", "/")
+                z.write(full, rel)
 
     shutil.rmtree(tmp, ignore_errors=True)
     size = os.path.getsize(out) / (1024 * 1024)

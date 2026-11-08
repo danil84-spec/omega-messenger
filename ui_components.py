@@ -53,6 +53,37 @@ def _circular_image(path: str, size: int):
         return None
 
 
+def _human_size(size: int) -> str:
+    value = float(size or 0)
+    for unit in ("Б", "КБ", "МБ", "ГБ"):
+        if value < 1024 or unit == "ГБ":
+            return f"{value:.0f} {unit}" if unit == "Б" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} ГБ"
+
+
+def _thumbnail(path: str, max_px: int):
+    """Уменьшенная копия картинки для пузыря."""
+    if not PIL_OK or not path or not os.path.exists(path):
+        return None
+    try:
+        img = Image.open(path).convert("RGB")
+        img.thumbnail((max_px, max_px), Image.LANCZOS)
+        return ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+    except Exception as e:
+        print(f"[thumb] {e}")
+        return None
+
+
+def _open_file(path: str) -> None:
+    if not path or not os.path.exists(path):
+        return
+    try:
+        os.startfile(path)          # noqa: S606 - Windows
+    except Exception as e:
+        print(f"[open] {e}")
+
+
 class Avatar(ctk.CTkFrame):
     """Круглый аватар: картинка или цветной круг с инициалом."""
 
@@ -314,7 +345,8 @@ class MessageBubble(ctk.CTkFrame):
 
     def __init__(self, master, text: str, outgoing: bool, time_text: str,
                  settings, theme: Theme, max_px: int = 460,
-                 status: str = "", system: bool = False, read: bool = False):
+                 status: str = "", system: bool = False, read: bool = False,
+                 attachment: dict | None = None):
         if system:
             super().__init__(master, fg_color="transparent")
             ctk.CTkLabel(self, text=text, text_color=theme.text_dim,
@@ -326,13 +358,58 @@ class MessageBubble(ctk.CTkFrame):
         fg = theme.bubble_out_text if outgoing else theme.bubble_in_text
         super().__init__(master, fg_color=bg, corner_radius=14)
 
-        self.body = ctk.CTkLabel(
-            self, text=text, text_color=fg, justify="left", anchor="w",
-            wraplength=max(120, max_px - 28), font=settings.font(12))
-        self.body.grid(row=0, column=0, sticky="w", padx=(12, 12), pady=(7, 0))
+        self.body = None
+        self._photo = None
+        row = 0
+        width = 0
+
+        if attachment:
+            kind = attachment.get("type")
+            path = attachment.get("path") or ""
+            if kind == "image" and PIL_OK and os.path.exists(path):
+                img = _thumbnail(path, max(160, min(280, max_px - 20)))
+                if img is not None:
+                    self._photo = img
+                    label = ctk.CTkLabel(self, text="", image=img)
+                    label.grid(row=row, column=0, padx=6, pady=(6, 0))
+                    label.bind("<Button-1>", lambda e, p=path: _open_file(p))
+                    row += 1
+                    width = img._size[0] + 12
+            if row == 0:
+                card = ctk.CTkFrame(self, fg_color="transparent")
+                card.grid(row=row, column=0, sticky="w", padx=(10, 10), pady=(8, 0))
+                ctk.CTkLabel(
+                    card, text=attachment.get("icon", "\U0001F4C4"),
+                    text_color=fg, font=(settings.font_family, 22)).pack(side="left")
+                info = ctk.CTkFrame(card, fg_color="transparent")
+                info.pack(side="left", padx=(8, 0))
+                name = attachment.get("name") or "файл"
+                ctk.CTkLabel(info, text=name[:40], text_color=fg, anchor="w",
+                             font=settings.font(12, bold=True)).pack(anchor="w")
+                ctk.CTkLabel(info, text=_human_size(attachment.get("size") or 0),
+                             text_color=theme.text_dim, anchor="w",
+                             font=settings.font(10)).pack(anchor="w")
+                card.bind("<Button-1>", lambda e, p=path: _open_file(p))
+                for w in card.winfo_children():
+                    w.bind("<Button-1>", lambda e, p=path: _open_file(p))
+                row += 1
+                width = 220
+
+        if text:
+            self.body = ctk.CTkLabel(
+                self, text=text, text_color=fg, justify="left", anchor="w",
+                wraplength=max(120, max_px - 28), font=settings.font(12))
+            self.body.grid(row=row, column=0, sticky="w", padx=(12, 12),
+                           pady=(7, 0))
+            row += 1
+            try:
+                self.body.update_idletasks()
+                width = max(width, self.body.winfo_reqwidth() + 26)
+            except Exception:
+                pass
 
         meta = ctk.CTkFrame(self, fg_color="transparent")
-        meta.grid(row=1, column=0, sticky="e", padx=(0, 8), pady=(0, 5))
+        meta.grid(row=row, column=0, sticky="e", padx=(0, 8), pady=(0, 5))
         ctk.CTkLabel(meta, text=time_text, text_color=theme.text_dim,
                      font=settings.font(10)).pack(side="left")
 
@@ -346,8 +423,7 @@ class MessageBubble(ctk.CTkFrame):
 
         self.update_idletasks()
         try:
-            width = self.body.winfo_reqwidth() + 26
-            self.configure(width=max(90, min(width, max_px)))
+            self.configure(width=max(90, min(width or 120, max_px)))
         except Exception:
             pass
 
@@ -528,11 +604,18 @@ class ChatView(ctk.CTkFrame):
         text = rec.get("text", "")
         if not system and not rec.get("trusted", True) and not outgoing:
             text += "\n\u26A0 ключ не подтверждён"
+        attachment = None
+        if rec.get("type") in ("image", "file"):
+            attachment = {"type": rec["type"], "path": rec.get("path", ""),
+                          "name": rec.get("name", ""),
+                          "size": rec.get("size", 0),
+                          "icon": "\U0001F5BC" if rec["type"] == "image" else "\U0001F4C4"}
         bubble = MessageBubble(
             self.canvas, text=text, outgoing=outgoing, time_text=time_text,
             settings=self.settings, theme=self.theme,
             max_px=max(240, int(self.canvas.winfo_width() * 0.68)),
-            status=rec.get("status", ""), system=system, read=read)
+            status=rec.get("status", ""), system=system, read=read,
+            attachment=attachment)
         self._add_widget(bubble, side="out" if outgoing else "in")
 
     def _relayout(self) -> None:
